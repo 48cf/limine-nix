@@ -128,6 +128,7 @@ def main():
 
   config_file = textwrap.dedent('''
     TIMEOUT=5
+    EDITOR_ENABLED=@enableEditor@
     GRAPHICS=yes
     DEFAULT_ENTRY=2
 
