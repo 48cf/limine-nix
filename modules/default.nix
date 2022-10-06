@@ -1,8 +1,12 @@
 { config, lib, pkgs, ... } :
 
-{
+let
+  myPkgs = import ../packages {};
+
+in {
   config._module.args = {
-    myPkgs = import ../packages {};
+    myPkgs = myPkgs;
+    limine = myPkgs.limine;
   };
 
   imports = [./limine.nix];

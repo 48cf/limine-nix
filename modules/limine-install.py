@@ -1,5 +1,6 @@
 #!@python3@/bin/python3 -B
 
+import json
 import os
 import psutil
 import re
@@ -32,13 +33,13 @@ def get_profiles():
       path for path in os.listdir("/nix/var/nix/profiles/system-profiles/")
       if not path.endswith("-link")
     ]
-  
+
   return []
 
 
 def get_specialisations(profile, generation):
   spec_path = os.path.join(get_system_path(profile, generation), 'specialisation')
-  
+
   if not os.path.exists(spec_path):
     return []
 
@@ -56,8 +57,9 @@ def get_generations(profile = 'system'):
 
   gen_lines = gen_list.split('\n')
   gens = [int(line.split()[0]) for line in gen_lines[:-1]]
+  gens = [(gen, get_specialisations(profile, gen)) for gen in gens]
 
-  return [(gen, get_specialisations(profile, gen)) for gen in gens]
+  return gens[-@maxGenerations@:]
 
 
 def copy_from_profile(profile, generation, spec, name):
@@ -98,7 +100,7 @@ def find_mounted_device(path):
 
   while not os.path.ismount(path):
     path = os.path.dirname(path)
-  
+
   devices = [x for x in psutil.disk_partitions(all=True) if x.mountpoint == path]
 
   assert len(devices) == 1
@@ -117,6 +119,8 @@ def main():
   if not os.path.exists('@efiSysMountPoint@/limine'):
     os.mkdir('@efiSysMountPoint@/limine')
 
+  additional_entries = json.loads('''@additionalEntries@''')
+  additional_files = json.loads('''@additionalFiles@''')
   profiles = [('system', get_generations())]
 
   for profile in get_profiles():
@@ -133,17 +137,32 @@ def main():
   for (profile, gens) in profiles:
     group_name = 'default profile' if profile == 'system' else f"profile '{profile}'"
     config_file += f':+NixOS {group_name}\n'
-    
+
     for (gen, specs) in sorted(gens, key=lambda x: x[0], reverse=True):
       config_file += generate_config_entry(profile, gen, None)
 
       for spec in specs:
         config_file += generate_config_entry(profile, gen, spec)
 
+  config_file += '\n# NixOS boot entries end here\n\n'
+
+  for name, entry in additional_entries.items():
+    indented_entry = textwrap.indent(entry, '  ')
+    config_file += f':{name}\n{indented_entry}\n'
+
   with open('@efiSysMountPoint@/limine/limine.cfg', 'w') as file:
-    file.write(config_file)
+    file.write(config_file.strip())
 
   shutil.copyfile('@limine@/usr/local/share/limine/BOOTX64.EFI', '@efiSysMountPoint@/limine.efi')
+
+  for dest_path, source_path in additional_files.items():
+    efi_dest_path = f'@efiSysMountPoint@/{dest_path}'
+    efi_dir_name = os.path.dirname(efi_dest_path)
+
+    if not os.path.exists(efi_dir_name):
+      os.makedirs(efi_dir_name)
+
+    shutil.copyfile(source_path, efi_dest_path)
 
   efi_partition = find_mounted_device('@efiSysMountPoint@')
   efi_disk = find_disk_device(efi_partition)
@@ -163,6 +182,7 @@ def main():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
       )
+
 
 if __name__ == '__main__':
   main()
