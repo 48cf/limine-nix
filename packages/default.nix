@@ -1,10 +1,11 @@
-{ pkgs? import <nixpkgs> {} } :
+{ lib, pkgs? import <nixpkgs> {} } :
 
 {
   limine = import ./limine.nix {
+    inherit lib;
     inherit pkgs;
 
+    fetchurl = pkgs.fetchurl;
     llvm = pkgs.llvmPackages_14;
-    lld = pkgs.lld_14;
   };
 }

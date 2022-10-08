@@ -1,34 +1,54 @@
-{ config, lib, pkgs, myPkgs, limine, ... } :
+{ config, lib, pkgs, ... } :
+
+with lib;
 
 let
   cfg = config.boot.loader.limine;
   efi = config.boot.loader.efi;
+  myPkgs = import ../packages { inherit lib; };
+  limineInstallConfig = pkgs.writeText "limine-install.json" (builtins.toJSON {
+    nixPath = config.nix.package;
+    efiBootMgrPath = pkgs.efibootmgr;
+    liminePath = cfg.package;
+    efiMountPoint = efi.efiSysMountPoint;
+    fileSystems = config.fileSystems;
+    luksDevices = config.boot.initrd.luks.devices;
+    canTouchEfiVariables = efi.canTouchEfiVariables;
+    maxGenerations = if cfg.maxGenerations == null then 0 else cfg.maxGenerations;
+    hostArchitecture = pkgs.stdenv.hostPlatform.parsed.cpu;
+    timeout = if config.boot.loader.timeout != null then config.boot.loader.timeout else 10;
+    enableEditor = cfg.enableEditor;
+    additionalEntries = cfg.additionalEntries;
+    additionalFiles = cfg.additionalFiles;
+    forceMbr = cfg.forceMbr;
+    useStorePaths = cfg.useStorePaths;
+  });
 
 in {
   options.boot.loader.limine = {
-    enable = lib.mkOption {
+    enable = mkOption {
       default = false;
-      type = lib.types.bool;
-      description = lib.mdDoc ''
+      type = types.bool;
+      description = mdDoc ''
         Whether to enable the Limine bootloader.
       '';
     };
 
-    enableEditor = lib.mkOption {
+    enableEditor = mkOption {
       default = true;
-      type = lib.types.bool;
-      description = lib.mdDoc ''
+      type = types.bool;
+      description = mdDoc ''
         Whether to allow editing the boot entries before booting them.
         It is recommended to set this to false, as it allows gaining root
         access by passing `init=/bin/sh` as a kernel parameter.
       '';
     };
 
-    maxGenerations = lib.mkOption {
-      default = null;
+    maxGenerations = mkOption {
+      default = 10;
       example = 50;
-      type = lib.types.nullOr lib.types.int;
-      description = lib.mdDoc ''
+      type = types.nullOr types.int;
+      description = mdDoc ''
         Maximum number of latest generations in the boot menu.
         Useful to prevent boot partition of running out of disk space.
 
@@ -37,55 +57,81 @@ in {
       '';
     };
 
-    additionalEntries = lib.mkOption {
+    additionalEntries = mkOption {
       default = {};
-      type = lib.types.attrsOf lib.types.str;
-      example = lib.literalExpression ''
-        { "memtest86" = '''
-          PROTOCOL=chainload
-          IMAGE_PATH=boot:///efi/memtest86/memtest86.efi
-        '''; }
+      type = types.attrsOf types.str;
+      example = literalExpression ''
+        {
+          "memtest86" = '''
+            PROTOCOL=chainload
+            IMAGE_PATH=boot:///efi/memtest86/memtest86.efi
+          ''';
+        }
       '';
-      description = lib.mdDoc ''
+      description = mdDoc ''
         Any additional entries you want added to the Limine boot menu. Each attribute denotes
         the display name of the boot entry, which need be formatted according to the Limine
         documentation which you can find [here](https://github.com/limine-bootloader/limine/blob/trunk/CONFIG.md).
       '';
     };
 
-    additionalFiles = lib.mkOption {
+    additionalFiles = mkOption {
       default = {};
-      type = lib.types.attrsOf lib.types.path;
-      example = lib.literalExpression ''
-        { "efi/memtest86/memtest86.efi" = "${pkgs.memtest86-efi}/BOOTX64.efi"; }
+      type = types.attrsOf types.path;
+      example = literalExpression ''
+        { "efi/memtest86/memtest86.efi" = "''${pkgs.memtest86-efi}/BOOTX64.efi"; }
       '';
-      description = lib.mdDoc ''
+      description = mdDoc ''
         A set of files to be copied to {file}`/boot`. Each attribute name denotes the
         destination file name in {file}`/boot`, while the corresponding attribute value
         specifies the source file.
       '';
     };
+
+    forceMbr = mkOption {
+      default = false;
+      type = types.bool;
+      description = mdDoc ''
+        Force MBR detection to work even if the safety checks fail, use absolutely only if necessary!
+      '';
+    };
+
+    useStorePaths = mkOption {
+      default = false;
+      type = types.bool;
+      description = mdDoc ''
+        Use direct Nix store paths instead of copying boot files onto the boot partition. This is
+        noticeably slower but can greatly reduce the space usage on the boot partition.
+      '';
+    };
+
+    package = mkOption {
+      default = myPkgs.limine;
+      defaultText = literalExpression "pkgs.limine";
+      type = types.package;
+      description = mdDoc ''
+        Which Limine package to use for installation.
+      '';
+    };
   };
 
-  config = lib.mkIf cfg.enable {
-    boot.loader.grub.enable = lib.mkDefault false;
+  config = mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = pkgs.stdenv.hostPlatform.isx86;
+        message = "Limine can only be installed on x86 platforms";
+      }
+    ];
+
+    boot.loader.grub.enable = mkDefault false;
     system = {
       boot.loader.id = "limine";
       build.installBootLoader = pkgs.substituteAll {
         src = ./limine-install.py;
         isExecutable = true;
 
-        nix = config.nix.package;
-        python3 = (pkgs.python3.withPackages (python-packages: [python-packages.psutil]));
-        efibootmgr = pkgs.efibootmgr;
-        limine = limine;
-        efiSysMountPoint = efi.efiSysMountPoint;
-        canTouchEfiVariables = efi.canTouchEfiVariables;
-        maxGenerations = if cfg.maxGenerations == null then 0 else cfg.maxGenerations;
-        timeout = if config.boot.loader.timeout != null then config.boot.loader.timeout else "10";
-        enableEditor = if cfg.enableEditor then "yes" else "no";
-        additionalEntries = builtins.replaceStrings ["\\n"] ["\\\\n"] (builtins.toJSON cfg.additionalEntries);
-        additionalFiles = builtins.replaceStrings ["\\n"] ["\\\\n"] (builtins.toJSON cfg.additionalFiles);
+        python3 = (pkgs.python3.withPackages (python-packages: [ python-packages.psutil]));
+        configPath = limineInstallConfig;
       };
     };
   };

@@ -9,91 +9,118 @@ import subprocess
 import sys
 import textwrap
 
+class DotDict(dict):
+  __getattr__ = dict.__getitem__
+  __setattr__ = dict.__setitem__
+  __delattr__ = dict.__delitem__
 
-def get_system_path(profile = 'system', generation = None, spec = None):
+  def __init__(self, dct):
+    for key, value in dct.items():
+      if hasattr(value, 'keys'):
+        value = DotDict(value)
+      self[key] = value
+
+limine_dir = None
+root_fs_uuid = None
+can_use_direct_paths = False
+install_config = DotDict(json.load(open('@configPath@', 'r')))
+
+def get_system_path(profile='system', gen=None, spec=None):
   if profile == 'system':
     result = '/nix/var/nix/profiles/system'
   else:
     result = f'/nix/var/nix/profiles/system-profiles/{profile}'
 
-  if generation is None:
-    return result
+  if gen is not None:
+    result += f'-{gen}-link'
 
-  result += f'-{generation}-link'
+  if spec is not None:
+    result = os.path.join(result, 'specialisation', spec)
 
-  if spec is None:
-    return result
-
-  return os.path.join(result, 'specialisation', spec)
-
+  return result
 
 def get_profiles():
-  if os.path.isdir("/nix/var/nix/profiles/system-profiles/"):
-    return [
-      path for path in os.listdir("/nix/var/nix/profiles/system-profiles/")
-      if not path.endswith("-link")
-    ]
+  profiles_dir = '/nix/var/nix/profiles/system-profiles/'
+  dirs = os.listdir(profiles_dir) if os.path.isdir(profiles_dir) else []
 
-  return []
+  return [path for path in dirs if not path.endswith('-link')]
 
+def get_specs(profile, gen):
+  gen_dir = get_system_path(profile, gen)
+  spec_dir = os.path.join(gen_dir, 'specialisation')
 
-def get_specialisations(profile, generation):
-  spec_path = os.path.join(get_system_path(profile, generation), 'specialisation')
+  return os.listdir(spec_dir) if os.path.exists(spec_dir) else []
 
-  if not os.path.exists(spec_path):
-    return []
-
-  return os.listdir(spec_path)
-
-
-def get_generations(profile = 'system'):
-  gen_list = subprocess.check_output([
-    '@nix@/bin/nix-env',
-    '--list-generations',
+def get_gens(profile='system'):
+  nix_env = os.path.join(install_config.nixPath, 'bin', 'nix-env')
+  output = subprocess.check_output([
+    nix_env, '--list-generations',
     '-p', get_system_path(profile),
-    '--option', 'build-users-group', ''],
-    universal_newlines=True,
-  )
+    '--option', 'build-users-group', '',
+  ], universal_newlines=True)
 
-  gen_lines = gen_list.split('\n')
-  gens = [int(line.split()[0]) for line in gen_lines[:-1]]
-  gens = [(gen, get_specialisations(profile, gen)) for gen in gens]
+  gen_lines = output.splitlines()
+  gen_nums = [int(line.split()[0]) for line in gen_lines[:-1]]
 
-  return gens[-@maxGenerations@:]
+  return [(gen, get_specs(profile, gen)) for gen in gen_nums][-install_config.maxGenerations:]
 
+def is_encrypted(device):
+  for name, _ in install_config.luksDevices.items():
+    if os.readlink(f'/dev/mapper/{name}') == os.readlink(device):
+      return True
 
-def copy_from_profile(profile, generation, spec, name):
-  store_path = get_system_path(profile, generation, spec)
-  store_file_path = os.path.realpath(f'{store_path}/{name}')
-  suffix = os.path.basename(store_file_path)
-  store_path = os.path.basename(os.path.dirname(store_file_path))
-  dest_path = f'/limine/{store_path}-{suffix}'
-  efi_dest_path = f'@efiSysMountPoint@{dest_path}'
+  return False
 
-  if not os.path.exists(efi_dest_path):
-    shutil.copyfile(store_file_path, efi_dest_path)
+def is_fs_type_supported(fs_type):
+  return fs_type.startswith('ext') or fs_type.startswith('vfat')
 
-  return dest_path
+def get_file_path(profile, gen, spec, name):
+  gen_path = get_system_path(profile, gen, spec)
+  path_in_store = os.path.realpath(os.path.join(gen_path, name))
 
+  if can_use_direct_paths:
+    return f'uuid://{root_fs_uuid}{path_in_store}'
+  else:
+    package_id = os.path.basename(os.path.dirname(path_in_store))
+    suffix = os.path.basename(path_in_store)
+    dest_file = f'{package_id}-{suffix}'
+    dest_path = os.path.join(limine_dir, dest_file)
+
+    if not os.path.exists(dest_path):
+      copy_file(path_in_store, dest_path)
+
+    path_with_prefix = os.path.join('/limine', dest_file)
+
+    return f'boot://{path_with_prefix}'
 
 def generate_config_entry(profile, gen, spec):
-  spec_name = ' (specialization {spec})' if spec else ''
+  entry_name = f'Generation {gen}'
+
+  if spec:
+    entry_name += f' (specialisation {spec})'
+
   gen_path = os.readlink(get_system_path(profile, gen, spec))
-  kernel_path = copy_from_profile(profile, gen, spec, 'kernel')
-  initrd_path = copy_from_profile(profile, gen, spec, 'initrd')
+  kernel_path = get_file_path(profile, gen, spec, 'kernel')
+  initrd_path = get_file_path(profile, gen, spec, 'initrd')
   cmdline = f'init={gen_path}/init '
 
   with open(f'{gen_path}/kernel-params') as file:
     cmdline += file.read()
 
   return textwrap.dedent(f'''
-    ::Generation {gen}{spec_name}
-      PROTOCOL=linux
-      CMDLINE={cmdline.strip()}
-      KERNEL_PATH=boot://{kernel_path}
-      MODULE_PATH=boot://{initrd_path}
+    ::{entry_name}
+    PROTOCOL=linux
+    CMDLINE={cmdline.strip()}
+    KERNEL_PATH={kernel_path}
+    MODULE_PATH={initrd_path}
   ''')
 
+def find_disk_device(part):
+  part = part.removeprefix('/dev/')
+  disk = os.readlink(f'/sys/class/block/{part}')
+  disk = os.path.dirname(disk)
+
+  return f'/dev/{os.path.basename(disk)}'
 
 def find_mounted_device(path):
   path = os.path.abspath(path)
@@ -106,29 +133,73 @@ def find_mounted_device(path):
   assert len(devices) == 1
   return devices[0].device
 
+def copy_file(from_path, to_path):
+  dirname = os.path.dirname(from_path)
 
-def find_disk_device(part):
-  part = part.removeprefix('/dev/')
-  disk = os.readlink(f'/sys/class/block/{part}')
-  disk = os.path.dirname(disk)
+  if not os.path.exists(dirname):
+    os.makedirs(dirname)
 
-  return f'/dev/{os.path.basename(disk)}'
-
+  shutil.copyfile(from_path, to_path)
 
 def main():
-  if not os.path.exists('@efiSysMountPoint@/limine'):
-    os.mkdir('@efiSysMountPoint@/limine')
+  global root_fs_uuid
+  global can_use_direct_paths
+  global limine_dir
 
-  additional_entries = json.loads('''@additionalEntries@''')
-  additional_files = json.loads('''@additionalFiles@''')
-  profiles = [('system', get_generations())]
+  for mount_point, fs in install_config.fileSystems.items():
+    if mount_point == '/':
+      root_fs = fs
+      root_fs_uuid = fs.device.split('/')[-1]
+    elif mount_point == '/boot':
+      boot_fs = fs
+
+  is_root_fs_type_ok = is_fs_type_supported(root_fs.fsType)
+  is_root_fs_encrypted = is_encrypted(root_fs.device)
+  can_use_direct_paths = install_config.useStorePaths and is_root_fs_type_ok and not is_root_fs_encrypted
+
+  if install_config.canTouchEfiVariables:
+    limine_dir = os.path.join(install_config.efiMountPoint, 'limine')
+  elif can_use_direct_paths:
+    limine_dir = '/limine'
+  else:
+    if boot_fs and is_fs_type_supported(boot_fs.fsType) and not is_encrypted(boot_fs.device):
+      limine_dir = '/boot/limine'
+    else:
+      possible_causes = [
+        f'/limine on the root partition ({is_root_fs_type_ok=} {is_root_fs_encrypted=})'
+      ]
+
+      if not boot_fs:
+        possible_causes += f'/limine on the boot partition (not present)'
+      else:
+        is_boot_fs_type_ok = is_fs_type_supported(boot_fs.fsType)
+        is_boot_fs_encrypted = is_encrypted(boot_fs.device)
+        possible_causes += f'/limine on the boot partition ({is_boot_fs_type_ok=} {is_boot_fs_encrypted=})'
+
+      causes_str = textwrap.indent(possible_causes.join('\n'), '  - ')
+
+      raise Exception(textwrap.dedent(f'''
+        Could not find a valid place for Limine configuration files!'
+
+        Possible candidates that were ruled out:
+        {causes_str}
+
+        Limine cannot be installed on a system without an unencrypted
+        partition formatted as EXT2/3/4 or FAT.
+      '''))
+
+  if not os.path.exists(limine_dir):
+    os.makedirs(limine_dir)
+
+  profiles = [('system', get_gens())]
 
   for profile in get_profiles():
-    profiles += (profile, get_generations(profile))
+    profiles += (profile, get_gens(profile))
 
-  config_file = textwrap.dedent('''
-    TIMEOUT=5
-    EDITOR_ENABLED=@enableEditor@
+  editor_enabled = 'yes' if install_config.enableEditor else 'no'
+  config_file = textwrap.dedent(f'''
+    TIMEOUT={install_config.timeout}
+    EDITOR_ENABLED={editor_enabled}
     GRAPHICS=yes
     DEFAULT_ENTRY=2
 
@@ -145,45 +216,72 @@ def main():
       for spec in specs:
         config_file += generate_config_entry(profile, gen, spec)
 
+  config_file_path = os.path.join(limine_dir, 'limine.cfg')
   config_file += '\n# NixOS boot entries end here\n\n'
 
-  for name, entry in additional_entries.items():
+  for name, entry in install_config.additionalEntries.items():
     indented_entry = textwrap.indent(entry, '  ')
     config_file += f':{name}\n{indented_entry}\n'
 
-  with open('@efiSysMountPoint@/limine/limine.cfg', 'w') as file:
+  with open(config_file_path, 'w') as file:
     file.write(config_file.strip())
 
-  shutil.copyfile('@limine@/usr/local/share/limine/BOOTX64.EFI', '@efiSysMountPoint@/limine.efi')
+  for dest_path, source_path in install_config.additionalFiles.items():
+    dest_path = os.path.join(limine_dir, dest_path)
 
-  for dest_path, source_path in additional_files.items():
-    efi_dest_path = f'@efiSysMountPoint@/{dest_path}'
-    efi_dir_name = os.path.dirname(efi_dest_path)
+    copy_file(source_path, dest_path)
 
-    if not os.path.exists(efi_dir_name):
-      os.makedirs(efi_dir_name)
+  if install_config.canTouchEfiVariables:
+    if install_config.hostArchitecture.family == 'x86':
+      if install_config.hostArchitecture.bits == 32:
+        boot_file = 'BOOTIA32.EFI'
+      elif install_config.hostArchitecture.bits == 64:
+        boot_file = 'BOOTX64.EFI'
+    else:
+      raise Exception(f'Unsupported CPU family: {install_config.hostArchitecture.family}')
 
-    shutil.copyfile(source_path, efi_dest_path)
+    efi_path = os.path.join(install_config.liminePath, 'share', 'limine', boot_file)
+    dest_path = os.path.join(install_config.efiMountPoint, 'efi', 'boot', boot_file)
 
-  efi_partition = find_mounted_device('@efiSysMountPoint@')
-  efi_disk = find_disk_device(efi_partition)
-  efibootmgr_output = subprocess.check_output([
-    '@efibootmgr@/bin/efibootmgr',
-    '-c',
-    '-d', efi_disk,
-    '-p', efi_partition.removeprefix(efi_disk).removeprefix('p'),
-    '-l', '\limine.efi',
-    '-L', 'Limine',
-  ], stderr=subprocess.STDOUT, universal_newlines=True)
+    copy_file(efi_path, dest_path)
 
-  for line in efibootmgr_output.split('\n'):
-    if matches := re.findall(r'Boot([0-9a-fA-F]{4}) has same label Limine', line):
-      subprocess.run(
-        ['@efibootmgr@/bin/efibootmgr', '-b', matches[0], '-B'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    efibootmgr = os.path.join(install_config.efiBootMgrPath, 'bin', 'efibootmgr')
+    efi_partition = find_mounted_device(install_config.efiMountPoint)
+    efi_disk = find_disk_device(efi_partition)
+    efibootmgr_output = subprocess.check_output([
+      efibootmgr,
+      '-c',
+      '-d', efi_disk,
+      '-p', efi_partition.removeprefix(efi_disk).removeprefix('p'),
+      '-l', f'\\efi\\boot\\{boot_file}',
+      '-L', 'Limine',
+    ], stderr=subprocess.STDOUT, universal_newlines=True)
+
+    for line in efibootmgr_output.split('\n'):
+      if matches := re.findall(r'Boot([0-9a-fA-F]{4}) has same label Limine', line):
+        subprocess.run(
+          [efibootmgr, '-b', matches[0], '-B'],
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+        )
+  else:
+    disk_device = find_disk_device(root_fs.device)
+    limine_deploy = os.path.join(install_config.liminePath, 'bin', 'limine-deploy')
+    limine_sys = os.path.join(install_config.liminePath, 'share', 'limine', 'limine.sys')
+    limine_sys_dest = os.path.join(limine_dir, 'limine.sys')
+    limine_deploy_args = [limine_deploy, disk_device]
+
+    if install_config.forceMbr:
+      limine_deploy_args += '--force-mbr'
+
+    copy_file(limine_sys, limine_sys_dest)
+
+    try:
+      subprocess.run(limine_deploy_args)
+    except:
+      raise Exception(
+        'Failed to deploy stage 1 Limine bootloader!\n' +
+        'You might want to try enabling the `boot.loader.limine.forceMbr` option.'
       )
 
-
-if __name__ == '__main__':
-  main()
+main()
