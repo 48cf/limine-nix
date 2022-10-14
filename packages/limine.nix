@@ -2,10 +2,10 @@
 
 pkgs.stdenv.mkDerivation rec {
   name = "limine";
-  version = "4.20221007.0";
+  version = "4.20221014.1";
   src = fetchurl {
     url = "https://github.com/limine-bootloader/limine/releases/download/v${version}/limine-${version}.tar.xz";
-    sha256 = "sha256-444hpysAKH4xriyHibI3j3NeAGtxuzKvxo42uXXkqjs=";
+    sha256 = "sha256-zfPaFJfiuVnI5JabLPOZUzNt7vp0tRUesYCWWjO8FqY=";
   };
   nativeBuildInputs = [
     pkgs.autoconf

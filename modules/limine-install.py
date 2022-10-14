@@ -60,7 +60,7 @@ def get_gens(profile='system'):
   ], universal_newlines=True)
 
   gen_lines = output.splitlines()
-  gen_nums = [int(line.split()[0]) for line in gen_lines[:-1]]
+  gen_nums = [int(line.split()[0]) for line in gen_lines]
 
   return [(gen, get_specs(profile, gen)) for gen in gen_nums][-install_config.maxGenerations:]
 
@@ -116,8 +116,9 @@ def generate_config_entry(profile, gen, spec):
   ''')
 
 def find_disk_device(part):
+  part = os.path.realpath(part)
   part = part.removeprefix('/dev/')
-  disk = os.readlink(f'/sys/class/block/{part}')
+  disk = os.path.realpath(f'/sys/class/block/{part}')
   disk = os.path.dirname(disk)
 
   return f'/dev/{os.path.basename(disk)}'
@@ -134,7 +135,7 @@ def find_mounted_device(path):
   return devices[0].device
 
 def copy_file(from_path, to_path):
-  dirname = os.path.dirname(from_path)
+  dirname = os.path.dirname(to_path)
 
   if not os.path.exists(dirname):
     os.makedirs(dirname)
@@ -145,6 +146,9 @@ def main():
   global root_fs_uuid
   global can_use_direct_paths
   global limine_dir
+
+  root_fs = None
+  boot_fs = None
 
   for mount_point, fs in install_config.fileSystems.items():
     if mount_point == '/':
@@ -170,20 +174,19 @@ def main():
       ]
 
       if not boot_fs:
-        possible_causes += f'/limine on the boot partition (not present)'
+        possible_causes.append(f'/limine on the boot partition (not present)')
       else:
         is_boot_fs_type_ok = is_fs_type_supported(boot_fs.fsType)
         is_boot_fs_encrypted = is_encrypted(boot_fs.device)
-        possible_causes += f'/limine on the boot partition ({is_boot_fs_type_ok=} {is_boot_fs_encrypted=})'
+        possible_causes.append(f'/limine on the boot partition ({is_boot_fs_type_ok=} {is_boot_fs_encrypted=})')
 
       causes_str = textwrap.indent(possible_causes.join('\n'), '  - ')
 
-      raise Exception(textwrap.dedent(f'''
+      raise Exception(textwrap.dedent('''
         Could not find a valid place for Limine configuration files!'
 
         Possible candidates that were ruled out:
-        {causes_str}
-
+      ''') + causes_str + textwrap.dedent('''
         Limine cannot be installed on a system without an unencrypted
         partition formatted as EXT2/3/4 or FAT.
       '''))
