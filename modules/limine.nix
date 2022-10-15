@@ -5,7 +5,10 @@ with lib;
 let
   cfg = config.boot.loader.limine;
   efi = config.boot.loader.efi;
-  myPkgs = import ../packages { inherit lib; };
+  myPkgs = import ../packages {
+    inherit lib;
+    inherit pkgs;
+  };
   limineInstallConfig = pkgs.writeText "limine-install.json" (builtins.toJSON {
     nixPath = config.nix.package;
     efiBootMgrPath = pkgs.efibootmgr;
@@ -22,6 +25,8 @@ let
     additionalFiles = cfg.additionalFiles;
     forceMbr = cfg.forceMbr;
     useStorePaths = cfg.useStorePaths;
+    validateChecksums = cfg.validateChecksums;
+    panicOnChecksumMismatch = cfg.panicOnChecksumMismatch;
   });
 
 in {
@@ -102,6 +107,23 @@ in {
       description = mdDoc ''
         Use direct Nix store paths instead of copying boot files onto the boot partition. This is
         noticeably slower but can greatly reduce the space usage on the boot partition.
+      '';
+    };
+
+    validateChecksums = mkOption {
+      default = true;
+      type = types.bool;
+      description = mdDoc ''
+        Whether to validate file checksums before booting.
+      '';
+    };
+
+    panicOnChecksumMismatch = mkOption {
+      default = false;
+      type = types.bool;
+      description = mdDoc ''
+        Whether or not checksum validation failure should be a fatal
+        error at boot time.
       '';
     };
 

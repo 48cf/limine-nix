@@ -1,5 +1,6 @@
 #!@python3@/bin/python3 -B
 
+import hashlib
 import json
 import os
 import psutil
@@ -77,9 +78,10 @@ def is_fs_type_supported(fs_type):
 def get_file_path(profile, gen, spec, name):
   gen_path = get_system_path(profile, gen, spec)
   path_in_store = os.path.realpath(os.path.join(gen_path, name))
+  result = None
 
   if can_use_direct_paths:
-    return f'uuid://{root_fs_uuid}{path_in_store}'
+    result = f'uuid://{root_fs_uuid}{path_in_store}'
   else:
     package_id = os.path.basename(os.path.dirname(path_in_store))
     suffix = os.path.basename(path_in_store)
@@ -91,7 +93,16 @@ def get_file_path(profile, gen, spec, name):
 
     path_with_prefix = os.path.join('/limine', dest_file)
 
-    return f'boot://{path_with_prefix}'
+    result = f'boot://{path_with_prefix}'
+
+  if install_config.validateChecksums:
+    with open(path_in_store, 'rb') as file:
+      b2sum = hashlib.blake2b()
+      b2sum.update(file.read())
+
+      result += f'#{b2sum.hexdigest()}'
+
+  return result
 
 def generate_config_entry(profile, gen, spec):
   entry_name = f'Generation {gen}'
@@ -200,9 +211,11 @@ def main():
     profiles += (profile, get_gens(profile))
 
   editor_enabled = 'yes' if install_config.enableEditor else 'no'
+  hash_mismatch_panic = 'yes' if install_config.panicOnChecksumMismatch else 'no'
   config_file = textwrap.dedent(f'''
     TIMEOUT={install_config.timeout}
     EDITOR_ENABLED={editor_enabled}
+    HASH_MISMATCH_PANIC={hash_mismatch_panic}
     GRAPHICS=yes
     DEFAULT_ENTRY=2
 

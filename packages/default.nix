@@ -1,6 +1,4 @@
-{ lib, pkgs? import <nixpkgs> {} } :
-
-{
+{ lib, pkgs } : {
   limine = import ./limine.nix {
     inherit lib;
     inherit pkgs;
