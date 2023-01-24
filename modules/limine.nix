@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... } :
+{ config, lib, pkgs, ... }:
 
 with lib;
 
@@ -29,7 +29,8 @@ let
     panicOnChecksumMismatch = cfg.panicOnChecksumMismatch;
   });
 
-in {
+in
+{
   options.boot.loader.limine = {
     enable = mkOption {
       default = false;
@@ -63,7 +64,7 @@ in {
     };
 
     additionalEntries = mkOption {
-      default = {};
+      default = { };
       type = types.attrsOf types.str;
       example = literalExpression ''
         {
@@ -81,7 +82,7 @@ in {
     };
 
     additionalFiles = mkOption {
-      default = {};
+      default = { };
       type = types.attrsOf types.path;
       example = literalExpression ''
         { "efi/memtest86/memtest86.efi" = "''${pkgs.memtest86-efi}/BOOTX64.efi"; }
@@ -129,7 +130,7 @@ in {
 
     package = mkOption {
       default = myPkgs.limine;
-      defaultText = literalExpression "pkgs.limine";
+      defaultText = literalExpression "myPkgs.limine";
       type = types.package;
       description = mdDoc ''
         Which Limine package to use for installation.
@@ -152,7 +153,7 @@ in {
         src = ./limine-install.py;
         isExecutable = true;
 
-        python3 = (pkgs.python3.withPackages (python-packages: [ python-packages.psutil]));
+        python3 = (pkgs.python3.withPackages (python-packages: [ python-packages.psutil ]));
         configPath = limineInstallConfig;
       };
     };

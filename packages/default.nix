@@ -1,9 +1,9 @@
 { lib, pkgs } : {
   limine = import ./limine.nix {
     inherit lib;
-    inherit pkgs;
 
+    clangStdenv = pkgs.clangStdenv;
     fetchurl = pkgs.fetchurl;
-    llvm = pkgs.llvmPackages_14;
+    nasm = pkgs.nasm;
   };
 }
